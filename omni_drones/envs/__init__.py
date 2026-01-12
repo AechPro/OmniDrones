@@ -32,7 +32,7 @@ from .rearrange import Rearrange
 from .isaac_env import IsaacEnv
 
 try:
-    from .single import Forest, Pinball
+    from .single import Forest, Pinball, DepthNav
 except ModuleNotFoundError:
     print(
         "To run the environments which use `ContactSensor` and `RayCaster`,"

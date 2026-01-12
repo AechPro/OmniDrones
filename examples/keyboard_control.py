@@ -471,6 +471,17 @@ def main(cfg):
     from isaacsim.core.api.simulation_context import SimulationContext
     from omni_drones.robots.drone import MultirotorBase
     from omni_drones.utils.torch import euler_to_quaternion, quaternion_to_euler
+    
+    # Import OpenCV for real-time camera visualization
+    try:
+        import cv2
+        HAS_OPENCV = True
+    except ImportError:
+        HAS_OPENCV = False
+        print("Warning: OpenCV (cv2) not installed. Install it with: pip install opencv-python")
+        print("Real-time camera visualization will not work.")
+    from omni_drones.sensors.camera import Camera, PinholeCameraCfg
+    import dataclasses
 
     sim = SimulationContext(
         stage_units_in_meters=1.0,
@@ -494,7 +505,23 @@ def main(cfg):
 
     scene_utils.design_scene()
 
+    camera_cfg = PinholeCameraCfg(
+        sensor_tick=0,
+        resolution=(320, 240),
+        data_types=["rgb"],
+    )
+    # cameras used as sensors
+    camera_sensor = Camera(camera_cfg)
+    camera_sensor.spawn([
+        f"/World/envs/env_0/{drone.name}_0/base_link/Camera"
+    ])
+    # camera for visualization
+    # here we reuse the viewport camera, i.e., "/OmniverseKit_Persp"
+    camera_vis = Camera(dataclasses.replace(camera_cfg, resolution=(960, 720)))
+
     sim.reset()
+    camera_sensor.initialize(f"/World/envs/env_0/{drone.name}_*/base_link/Camera")
+    camera_vis.initialize("/OmniverseKit_Persp")
     drone.initialize()
 
     # Initialize controllers for position-based control
@@ -575,7 +602,8 @@ def main(cfg):
 
     from tqdm import tqdm
     exit_simulation = False
-    
+    frames_sensor = []
+    frames_vis = []
     # Main simulation loop
     for i in tqdm(range(cfg.get("steps", 10000)), desc="Simulating"):
         if sim.is_stopped() or exit_simulation:
@@ -635,6 +663,38 @@ def main(cfg):
         # Apply action
         drone.apply_action(action)
         sim.step(render=True)
+
+        # Get and display camera images in real-time
+        # if i % 2 == 0:  # Update display every 2 frames for performance
+        #     sensor_images = camera_sensor.get_images().cpu()
+        #     vis_images = camera_vis.get_images().cpu()
+            
+            # # Store frames for potential video saving
+            # frames_sensor.append(sensor_images)
+            # frames_vis.append(vis_images)
+            
+            # # Display camera feed in real-time using OpenCV
+            # if HAS_OPENCV:
+            #     # Get RGB images from sensor camera
+            #     # sensor_images["rgb"] has shape [num_cameras, C, H, W] = [1, C, H, W] for single camera
+            #     if "rgb" in sensor_images:
+            #         rgb_sensor = sensor_images["rgb"][0]  # Get first (and only) camera, shape: [C, H, W]
+            #         # Convert from CHW to HWC format
+            #         rgb_sensor = rgb_sensor.permute(1, 2, 0)  # [H, W, C]
+            #         # Handle RGBA -> RGB if needed
+            #         if rgb_sensor.shape[2] == 4:
+            #             rgb_sensor = rgb_sensor[..., :3]
+            #         # Convert to numpy and scale to [0, 255] (assuming input is in [0, 1] range)
+            #         # If already in [0, 255] range, remove the * 255
+            #         rgb_sensor_np = rgb_sensor.numpy()
+            #         if rgb_sensor_np.max() <= 1.0:
+            #             rgb_sensor_np = (rgb_sensor_np * 255).astype('uint8')
+            #         else:
+            #             rgb_sensor_np = rgb_sensor_np.astype('uint8')
+            #         # Convert RGB to BGR for OpenCV
+            #         rgb_sensor_bgr = cv2.cvtColor(rgb_sensor_np, cv2.COLOR_RGB2BGR)
+            #         cv2.imshow("Drone Camera Feed", rgb_sensor_bgr)
+            #         cv2.waitKey(1)  # Non-blocking wait for key press
 
         # Update drone state
         drone_state = drone.get_state()[..., :13].squeeze(0)

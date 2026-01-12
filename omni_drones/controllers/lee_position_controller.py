@@ -198,7 +198,13 @@ class LeePositionController(ControllerBase):
             - ang_rate_err * self.ang_rate_gain
             + torch.linalg.cross(ang_vel, ang_vel)
         )
-        thrust = (-self.mass * (acc * R[:, :, 2]).sum(-1, True))
+        # Compute thrust using a blend of current and desired body z-axis
+        # This provides a middle ground: uses desired direction for better gravity compensation
+        # but weights it with current attitude to avoid over-compensation during transients
+        # Blend factor: 0.7 desired + 0.3 current provides good balance
+        blend_factor = 0.45
+        b3_blend = normalize(blend_factor * b3_des + (1 - blend_factor) * R[:, :, 2])
+        thrust = (-self.mass * (acc * b3_blend).sum(-1, True))
         ang_acc_thrust = torch.cat([ang_acc, thrust], dim=-1)
         cmd = (self.mixer @ ang_acc_thrust.T).T
         cmd = (cmd / self.max_thrusts) * 2 - 1
