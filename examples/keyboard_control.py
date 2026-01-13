@@ -293,12 +293,12 @@ class JoystickController:
             
             # Left stick
             if num_axes > 0:
-                left_stick_x = self.joystick.get_axis(0)  # Roll (left/right)
+                left_stick_x = -self.joystick.get_axis(0)  # Roll (left/right)
             else:
                 left_stick_x = 0.0
             
             if num_axes > 1:
-                left_stick_y = self.joystick.get_axis(1)  # Pitch (forward/back)
+                left_stick_y = -self.joystick.get_axis(1)  # Pitch (forward/back)
             else:
                 left_stick_y = 0.0
             

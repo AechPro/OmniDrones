@@ -1,7 +1,7 @@
 headless: false
 
 max_iters: 10
-num_envs: 16
+num_envs: 1
 max_episode_length: 1000
 
 viewer:
@@ -10,7 +10,11 @@ viewer:
   lookat: [0., 0., 1.]
 
 wandb:
-  entity: finani
-  project: omnidrones-public
-  artifact_name: Track-ppo
-  artifact_version: rtx4090-20m-n128
+  # entity: finani
+  # project: omnidrones-public
+  # artifact_name: Track-ppo
+  # artifact_version: rtx4090-20m-n128
+  local_dir: /home/joonho/OmniDrones/scripts/wandb/run-20260106_114402-vq9uoro1
+  # local_dir: /home/joonho/OmniDrones/scripts/wandb/run-20260106_134500-13iq648m
+  # local_dir: /home/joonho/OmniDrones/scripts/wandb/run-20260108_162237-hvuar3y7 # platform hover ppo
+  # local_dir: /home/joonho/OmniDrones/scripts/wandb/run-20260108_160249-jj7fegd5 # platform hover mappo

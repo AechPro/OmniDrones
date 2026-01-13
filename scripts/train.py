@@ -1,6 +1,8 @@
 import logging
 import os
+import signal
 import time
+import yaml
 
 import hydra
 import torch
@@ -41,6 +43,34 @@ def main(cfg):
     run = init_wandb(cfg)
     setproctitle(run.name)
     print(OmegaConf.to_yaml(cfg))
+    
+    # Save config.yaml early to ensure it's available even if interrupted
+    # Wandb saves config.yaml when finish() is called, but we want it saved immediately
+    def save_config_early():
+        try:
+            config_path = os.path.join(run.dir, "files", "config.yaml")
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            # Save config in wandb's format: each key has a 'value' field
+            config_dict = {}
+            for key, value in run.config.items():
+                config_dict[key] = {"value": value}
+            with open(config_path, 'w') as f:
+                yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+            logging.info(f"Saved config.yaml to {config_path}")
+        except Exception as e:
+            logging.warning(f"Could not save config.yaml early: {e}")
+    
+    save_config_early()
+    
+    # Set up signal handler to ensure config is saved on Ctrl+C
+    # The finally block will handle wandb.finish() and simulation_app.close()
+    def signal_handler(sig, frame):
+        logging.info("Interrupted! Saving config...")
+        save_config_early()  # Save config immediately before cleanup
+        # Let the exception propagate to trigger finally block
+        raise KeyboardInterrupt
+    
+    signal.signal(signal.SIGINT, signal_handler)
 
     from omni_drones.envs.isaac_env import IsaacEnv
 
@@ -149,11 +179,13 @@ def main(cfg):
         }
 
         # log video
-        info["recording"] = wandb.Video(
-            render_callback.get_video_array(axes="t c h w"),
-            fps=0.5 / (cfg.sim.dt * cfg.sim.substeps),
-            format="mp4"
-        )
+        video_array = render_callback.get_video_array(axes="t c h w")
+        if video_array is not None:
+            info["recording"] = wandb.Video(
+                video_array,
+                fps=0.5 / (cfg.sim.dt * cfg.sim.substeps),
+                format="mp4"
+            )
 
         # log distributions
         # df = pd.DataFrame(traj_stats)
@@ -163,69 +195,71 @@ def main(cfg):
 
         return info
 
-    pbar = tqdm(collector, total=total_frames//frames_per_batch)
-    env.train()
-    for i, data in enumerate(pbar):
-        info = {"env_frames": collector._frames, "rollout_fps": collector._fps}
-        episode_stats.add(data.to_tensordict())
-
-        if len(episode_stats) >= base_env.num_envs:
-            stats = {
-                "train/" + (".".join(k) if isinstance(k, tuple) else k): torch.mean(v.float()).item()
-                for k, v in episode_stats.pop().items(True, True)
-            }
-            info.update(stats)
-
-        info.update(policy.train_op(data.to_tensordict()))
-
-        if eval_interval > 0 and i % eval_interval == 0:
-            logging.info(f"Eval at {collector._frames} steps.")
-            info.update(evaluate())
-            env.train()
-            base_env.train()
-
-        if save_interval > 0 and i % save_interval == 0:
-            try:
-                ckpt_path = os.path.join(run.dir, f"checkpoint_{collector._frames}.pt")
-                torch.save(policy.state_dict(), ckpt_path)
-                logging.info(f"Saved checkpoint to {str(ckpt_path)}")
-            except AttributeError:
-                logging.warning(f"Policy {policy} does not implement `.state_dict()`")
-
-        run.log(info)
-        print(OmegaConf.to_yaml({k: v for k, v in info.items() if isinstance(v, float)}))
-
-        pbar.set_postfix({"rollout_fps": collector._fps, "frames": collector._frames})
-
-        if max_iters > 0 and i >= max_iters - 1:
-            break
-
-    logging.info(f"Final Eval at {collector._frames} steps.")
-    info = {"env_frames": collector._frames}
-    info.update(evaluate())
-    run.log(info)
-
     try:
-        ckpt_path = os.path.join(run.dir, "checkpoint_final.pt")
-        torch.save(policy.state_dict(), ckpt_path)
+        pbar = tqdm(collector, total=total_frames//frames_per_batch)
+        env.train()
+        for i, data in enumerate(pbar):
+            info = {"env_frames": collector._frames, "rollout_fps": collector._fps}
+            episode_stats.add(data.to_tensordict())
 
-        model_artifact = wandb.Artifact(
-            f"{cfg.task.name}-{cfg.algo.name.lower()}",
-            type="model",
-            description=f"{cfg.task.name}-{cfg.algo.name.lower()}",
-            metadata=dict(cfg))
+            if len(episode_stats) >= base_env.num_envs:
+                stats = {
+                    "train/" + (".".join(k) if isinstance(k, tuple) else k): torch.mean(v.float()).item()
+                    for k, v in episode_stats.pop().items(True, True)
+                }
+                info.update(stats)
 
-        model_artifact.add_file(ckpt_path)
-        wandb.save(ckpt_path)
-        run.log_artifact(model_artifact)
+            info.update(policy.train_op(data.to_tensordict()))
 
-        logging.info(f"Saved checkpoint to {str(ckpt_path)}")
-    except AttributeError:
-        logging.warning(f"Policy {policy} does not implement `.state_dict()`")
+            if eval_interval > 0 and i % eval_interval == 0:
+                logging.info(f"Eval at {collector._frames} steps.")
+                info.update(evaluate())
+                env.train()
+                base_env.train()
 
-    wandb.finish()
+            if save_interval > 0 and i % save_interval == 0:
+                try:
+                    ckpt_path = os.path.join(run.dir, f"checkpoint_{collector._frames}.pt")
+                    torch.save(policy.state_dict(), ckpt_path)
+                    logging.info(f"Saved checkpoint to {str(ckpt_path)}")
+                except AttributeError:
+                    logging.warning(f"Policy {policy} does not implement `.state_dict()`")
 
-    simulation_app.close()
+            run.log(info)
+            print(OmegaConf.to_yaml({k: v for k, v in info.items() if isinstance(v, float)}))
+
+            pbar.set_postfix({"rollout_fps": collector._fps, "frames": collector._frames})
+
+            if max_iters > 0 and i >= max_iters - 1:
+                break
+
+        logging.info(f"Final Eval at {collector._frames} steps.")
+        info = {"env_frames": collector._frames}
+        info.update(evaluate())
+        run.log(info)
+
+        try:
+            ckpt_path = os.path.join(run.dir, "checkpoint_final.pt")
+            torch.save(policy.state_dict(), ckpt_path)
+
+            model_artifact = wandb.Artifact(
+                f"{cfg.task.name}-{cfg.algo.name.lower()}",
+                type="model",
+                description=f"{cfg.task.name}-{cfg.algo.name.lower()}",
+                metadata=dict(cfg))
+
+            model_artifact.add_file(ckpt_path)
+            wandb.save(ckpt_path)
+            run.log_artifact(model_artifact)
+
+            logging.info(f"Saved checkpoint to {str(ckpt_path)}")
+        except AttributeError:
+            logging.warning(f"Policy {policy} does not implement `.state_dict()`")
+    finally:
+        # Ensure config is saved and wandb is finished even on interruption
+        save_config_early()
+        wandb.finish()
+        simulation_app.close()
 
 
 if __name__ == "__main__":
