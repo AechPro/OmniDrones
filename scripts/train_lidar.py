@@ -306,11 +306,13 @@ def main(cfg):
         }
 
         # log video
-        info["recording"] = wandb.Video(
-            render_callback.get_video_array(axes="t c h w"),
-            fps=0.5 / (cfg.sim.dt * cfg.sim.substeps),
-            format="mp4"
-        )
+        video_array = render_callback.get_video_array(axes="t c h w")
+        if video_array is not None:
+            info["recording"] = wandb.Video(
+                video_array,
+                fps=0.5 / (cfg.sim.dt * cfg.sim.substeps),
+                format="mp4"
+            )
 
         # log distributions
         # df = pd.DataFrame(traj_stats)

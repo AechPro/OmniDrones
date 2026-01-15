@@ -1,4 +1,6 @@
 import os
+import yaml
+from pathlib import Path
 
 import hydra
 import torch
@@ -25,6 +27,39 @@ from setproctitle import setproctitle
 from torchrl.envs.transforms import TransformedEnv, InitTracker, Compose
 
 
+def parse_wandb_config(config_path):
+    """Parse wandb config.yaml and organize into nested dict structure."""
+    with open(config_path, 'r') as f:
+        config_data = yaml.safe_load(f)
+    
+    # Organize flat keys with dots into nested dicts
+    organized = {}
+    for key, value_dict in config_data.items():
+        if key == '_wandb':
+            continue
+        if not isinstance(value_dict, dict) or 'value' not in value_dict:
+            continue
+        
+        value = value_dict['value']
+        # Handle string values that might need eval
+        if isinstance(value, str):
+            try:
+                value = eval(value)
+            except:
+                pass
+        
+        # Split key by dots and create nested structure
+        keys = key.split('.')
+        current = organized
+        for k in keys[:-1]:
+            if k not in current:
+                current[k] = {}
+            current = current[k]
+        current[keys[-1]] = value
+    
+    return organized
+
+
 @hydra.main(version_base=None, config_path=".", config_name="demo_task")
 def main(cfg):
     OmegaConf.register_new_resolver("eval", eval)
@@ -35,18 +70,57 @@ def main(cfg):
     run = wandb.init()
     setproctitle(run.name)
 
-    model_artifact = run.use_artifact(f"{cfg.wandb.entity}/{cfg.wandb.project}/{cfg.wandb.artifact_name}:{cfg.wandb.artifact_version}")
-    model_dir = model_artifact.download()
-    model_filename = "checkpoint_final.pt"
-    for key in getattr(model_artifact, "_manifest").entries.keys():
-        print(key)
-        if key.split('.')[-1] == "pt":
-            model_filename = key
-    model_path = os.path.join(model_dir, model_filename)
-    artifact_config = model_artifact.metadata
-    for k, v in artifact_config.items():
-        if isinstance(v, str):
-            artifact_config[k] = eval(v)
+    # Check if using local directory or wandb artifact
+    if cfg.wandb.get("local_dir"):
+        # Load from local wandb directory
+        local_dir = Path(cfg.wandb.local_dir)
+        config_path = local_dir / "files" / "config.yaml"
+        if not config_path.exists():
+            # Try alternative structure: run-xxx/files/files/config.yaml
+            config_path = local_dir / "files" / "files" / "config.yaml"
+        
+        if not config_path.exists():
+            raise FileNotFoundError(f"config.yaml not found in {local_dir}")
+        
+        artifact_config = parse_wandb_config(config_path)
+        
+        # Find checkpoint file - check both possible locations
+        files_dir1 = local_dir / "files"
+        files_dir2 = local_dir / "files" / "files"
+        
+        checkpoint_files = list(files_dir1.glob("checkpoint*.pt"))
+        if not checkpoint_files:
+            checkpoint_files = list(files_dir2.glob("checkpoint*.pt"))
+            files_dir = files_dir2
+        else:
+            files_dir = files_dir1
+        
+        if not checkpoint_files:
+            raise FileNotFoundError(f"No checkpoint files found in {local_dir}")
+        
+        # Prefer checkpoint_final.pt, otherwise use the latest checkpoint
+        checkpoint_final = files_dir / "checkpoint_final.pt"
+        if not checkpoint_final.exists():
+            # Sort by modification time and get the latest
+            checkpoint_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            model_path = str(checkpoint_files[0])
+        else:
+            model_path = str(checkpoint_final)
+    else:
+        # Load from wandb artifact (existing logic)
+        model_artifact = run.use_artifact(f"{cfg.wandb.entity}/{cfg.wandb.project}/{cfg.wandb.artifact_name}:{cfg.wandb.artifact_version}")
+        model_dir = model_artifact.download()
+        model_filename = "checkpoint_final.pt"
+        for key in getattr(model_artifact, "_manifest").entries.keys():
+            print(key)
+            if key.split('.')[-1] == "pt":
+                model_filename = key
+        model_path = os.path.join(model_dir, model_filename)
+        artifact_config = model_artifact.metadata
+        for k, v in artifact_config.items():
+            if isinstance(v, str):
+                artifact_config[k] = eval(v)
+    
     artifact_cfg = OmegaConf.create(artifact_config)
     artifact_cfg.env.num_envs = cfg.num_envs
     artifact_cfg.task.env.num_envs = cfg.num_envs

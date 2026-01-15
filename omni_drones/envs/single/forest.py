@@ -32,7 +32,7 @@ from omni_drones.utils.torch import euler_to_quaternion, quat_axis
 from tensordict.tensordict import TensorDict, TensorDictBase
 from torchrl.data import Unbounded, Composite, DiscreteTensorSpec
 
-from omni.isaac.core.utils.viewports import set_camera_view
+from isaacsim.core.utils.viewports import set_camera_view
 
 
 class Forest(IsaacEnv):

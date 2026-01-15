@@ -29,7 +29,6 @@ import omni.physx.scripts.utils as script_utils
 import torch
 
 from omni_drones.views import RigidPrimView
-from omni.kit.commands import execute
 from pxr import Gf, PhysxSchema, UsdGeom, UsdPhysics
 
 import omni_drones.utils.kit as kit_utils
@@ -136,16 +135,10 @@ class TransportationGroup(RobotBase):
                     translations=drone_translations[i],
                     prim_paths=[f"{prim_path}/{self.drone.name.lower()}_{i}"],
                 )[0]
-                execute(
-                    "UnapplyAPISchema",
-                    api=UsdPhysics.ArticulationRootAPI,
-                    prim=drone_prim,
-                )
-                execute(
-                    "UnapplyAPISchema",
-                    api=PhysxSchema.PhysxArticulationAPI,
-                    prim=drone_prim,
-                )
+                # Iterate through the pre-applied schemas and remove them
+                # https://openusd.org/dev/api/class_usd_prim.html#aa5375b5403261404ff744636701f4fbd
+                for schema in drone_prim.GetAppliedSchemas():
+                    drone_prim.RemoveAPI(schema)
 
                 scene_utils.create_bar(
                     prim_path=f"{prim_path}/{self.drone.name.lower()}_{i}/bar",

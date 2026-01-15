@@ -28,7 +28,6 @@ import isaacsim.core.utils.prims as prim_utils
 import isaacsim.core.utils.stage as stage_utils
 import omni_drones.utils.kit as kit_utils
 import omni.physx.scripts.utils as script_utils
-from omni.kit.commands import execute
 import torch
 
 from pxr import Gf, Usd, UsdGeom, UsdPhysics, PhysxSchema
@@ -187,17 +186,11 @@ class OveractuatedPlatform(RobotBase):
                     for j in range(drone_translations.shape[0])
                 ],
             )
-            for drone_prim in drone_prims:
-                execute(
-                    "UnapplyAPISchema",
-                    api=UsdPhysics.ArticulationRootAPI,
-                    prim=drone_prim,
-                )
-                execute(
-                    "UnapplyAPISchema",
-                    api=PhysxSchema.PhysxArticulationAPI,
-                    prim=drone_prim,
-                )
+            # Iterate through the pre-applied schemas and remove them
+            # https://openusd.org/dev/api/class_usd_prim.html#aa5375b5403261404ff744636701f4fbd
+            for _prim in drone_prims:
+                for schema in _prim.GetAppliedSchemas():
+                    _prim.RemoveAPI(schema)
 
             self._create_frame(
                 f"/World/envs/env_0/{self.name}_{i}/frame",

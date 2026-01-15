@@ -25,6 +25,7 @@ import numpy as np
 import einops
 from tqdm import tqdm
 from typing import Optional, Sequence
+import warnings
 
 from dataclasses import dataclass
 from torchrl.envs import EnvBase
@@ -89,16 +90,60 @@ class RenderCallback:
         self.frames = []
         self.i = 0
         self.t = tqdm(desc="Rendering")
+        self._viewport_warning_shown = False
 
     def __call__(self, env, *args):
         if self.i % self.interval == 0:
-            frame = env.render(mode="rgb_array")
-            self.frames.append(frame)
-            self.t.update(self.interval)
+            # Check if viewport is enabled before attempting to render
+            # The enable_viewport attribute is on the base environment (IsaacEnv)
+            # Check both the env itself and its base_env if it exists
+            base_env = getattr(env, 'base_env', env)
+            enable_viewport = getattr(base_env, 'enable_viewport', None)
+            
+            # Check if Replicator is enabled (required for RGB rendering)
+            enable_replicator = False
+            if hasattr(base_env, 'cfg') and hasattr(base_env.cfg, 'sim'):
+                enable_replicator = getattr(base_env.cfg.sim, 'enable_replicator', False)
+            
+            if enable_viewport is False:
+                if not self._viewport_warning_shown:
+                    warnings.warn(
+                        "RenderCallback: Cannot render 'rgb_array' when viewport is disabled. "
+                        "Skipping rendering. To enable rendering, initialize the environment with "
+                        "headless=False or set enable_viewport=True.",
+                        UserWarning
+                    )
+                    self._viewport_warning_shown = True
+            elif not enable_replicator:
+                if not self._viewport_warning_shown:
+                    warnings.warn(
+                        "RenderCallback: Cannot render 'rgb_array' when Replicator is disabled. "
+                        "Skipping rendering. To enable rendering, set cfg.sim.enable_replicator=True.",
+                        UserWarning
+                    )
+                    self._viewport_warning_shown = True
+            else:
+                try:
+                    frame = env.render(mode="rgb_array")
+                    self.frames.append(frame)
+                    self.t.update(self.interval)
+                except RuntimeError as e:
+                    error_msg = str(e)
+                    if "enable viewport is False" in error_msg or "RGB rendering requires Replicator" in error_msg:
+                        if not self._viewport_warning_shown:
+                            warnings.warn(
+                                f"RenderCallback: {error_msg}. Skipping rendering.",
+                                UserWarning
+                            )
+                            self._viewport_warning_shown = True
+                    else:
+                        raise
         self.i += 1
         return self.i
 
     def get_video_array(self, axes: str = "t c h w"):
+        if len(self.frames) == 0:
+            return None
         return einops.rearrange(np.stack(self.frames), "t h w c -> " + axes)
 
 
