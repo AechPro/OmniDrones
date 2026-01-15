@@ -37,6 +37,13 @@ drone_model:
   name: Hummingbird
   controller: LeePositionController
 
+# Forest environment option
+use_forest: false  # Set to true to use Forest environment with terrain and obstacles
+lidar_range: 4.0  # Maximum lidar range (only used if use_forest is true)
+lidar_vfov: [-10., 20.]  # Vertical field of view for lidar (only used if use_forest is true)
+time_encoding: false  # Whether to include time encoding (only used if use_forest is true)
+reward_effort_weight: 0.1  # Reward effort weight (only used if use_forest is true)
+
 # Control parameters (Position Mode - similar to PX4)
 max_vel_horizontal: 2.0  # Maximum horizontal velocity in m/s
 max_vel_vertical: 1.5  # Maximum vertical velocity in m/s

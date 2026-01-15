@@ -30,7 +30,7 @@ import threading
 from collections import defaultdict
 
 import hydra
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 from omni_drones import init_simulation_app
 
 try:
@@ -472,6 +472,82 @@ def main(cfg):
     from omni_drones.robots.drone import MultirotorBase
     from omni_drones.utils.torch import euler_to_quaternion, quaternion_to_euler
     
+    # Check if Forest environment should be used
+    use_forest = cfg.get("use_forest", False)
+    forest_env = None
+    
+    if use_forest:
+        # Use Forest environment - it will set up terrain, obstacles, and lidar
+        try:
+            from omni_drones.envs.single.forest import Forest
+            
+            # Create a config for Forest environment with single env
+            forest_cfg = OmegaConf.create({
+                "task": {
+                    "name": "Forest",
+                    "drone_model": cfg.drone_model,
+                    "lidar_range": cfg.get("lidar_range", 4.0),
+                    "lidar_vfov": cfg.get("lidar_vfov", [-10., 20.]),
+                    "time_encoding": cfg.get("time_encoding", False),
+                    "reward_effort_weight": cfg.get("reward_effort_weight", 0.1),
+                    "randomization": cfg.get("randomization", {}),
+                },
+                "env": {
+                    "num_envs": 1,  # Single environment for manual control
+                    "max_episode_length": cfg.get("steps", 10000),
+                    "env_spacing": 1.0,
+                },
+                "sim": cfg.sim,
+                "viewer": cfg.viewer,
+            })
+            
+            # Create Forest environment instance
+            forest_env = Forest(forest_cfg, headless=cfg.headless)
+            
+            # Extract components from Forest environment
+            sim = forest_env.sim
+            drone = forest_env.drone
+            controller = forest_env.controller
+            # Ensure controller is on the correct device
+            controller = controller.to(cfg.sim.device)
+            
+            print("\n" + "="*60)
+            print("Forest environment enabled!")
+            print("  - Terrain with obstacles loaded")
+            print("  - Lidar sensor initialized")
+            print("="*60 + "\n")
+            
+        except ImportError as e:
+            print(f"Warning: Could not import Forest environment: {e}")
+            print("Falling back to basic scene.")
+            use_forest = False
+    
+    if not use_forest:
+        # Use basic scene setup
+        sim = SimulationContext(
+            stage_units_in_meters=1.0,
+            physics_dt=cfg.sim.dt,
+            rendering_dt=cfg.sim.dt,
+            sim_params=cfg.sim,
+            backend="torch",
+            device=cfg.sim.device,
+        )
+
+        # Create a single drone with position controller
+        drone_model_cfg = cfg.drone_model
+        drone, controller = MultirotorBase.make(
+            drone_model_cfg.name, "LeePositionController", cfg.sim.device
+        )
+        # Ensure controller is on the correct device
+        controller = controller.to(cfg.sim.device)
+
+        # Spawn drone at origin, slightly above ground
+        translations = torch.zeros(1, 3, device=cfg.sim.device)
+        translations[0, 2] = 1.0  # Start at height 1.0m
+        drone.spawn(translations=translations)
+
+        scene_utils.design_scene()
+    
     # Import OpenCV for real-time camera visualization
     try:
         import cv2
@@ -482,28 +558,6 @@ def main(cfg):
         print("Real-time camera visualization will not work.")
     from omni_drones.sensors.camera import Camera, PinholeCameraCfg
     import dataclasses
-
-    sim = SimulationContext(
-        stage_units_in_meters=1.0,
-        physics_dt=cfg.sim.dt,
-        rendering_dt=cfg.sim.dt,
-        sim_params=cfg.sim,
-        backend="torch",
-        device=cfg.sim.device,
-    )
-
-    # Create a single drone with position controller
-    drone_model_cfg = cfg.drone_model
-    drone, controller = MultirotorBase.make(
-        drone_model_cfg.name, "LeePositionController", cfg.sim.device
-    )
-
-    # Spawn drone at origin, slightly above ground
-    translations = torch.zeros(1, 3, device=cfg.sim.device)
-    translations[0, 2] = 1.0  # Start at height 1.0m
-    drone.spawn(translations=translations)
-
-    scene_utils.design_scene()
 
     camera_cfg = PinholeCameraCfg(
         sensor_tick=0,
@@ -523,6 +577,10 @@ def main(cfg):
     camera_sensor.initialize(f"/World/envs/env_0/{drone.name}_*/base_link/Camera")
     camera_vis.initialize("/OmniverseKit_Persp")
     drone.initialize()
+    
+    # Initialize lidar if using Forest environment
+    if use_forest:
+        forest_env.lidar._initialize_impl()
 
     # Initialize controllers for position-based control
     keyboard_ctrl = KeyboardController(
@@ -550,10 +608,21 @@ def main(cfg):
             print("="*60 + "\n")
 
     # Store initial state for reset
-    init_pos = translations.clone()
-    init_rpy = torch.zeros(1, 3, device=cfg.sim.device)
-    init_rot = euler_to_quaternion(init_rpy)
-    init_vels = torch.zeros(1, 6, device=cfg.sim.device)
+    if use_forest:
+        # Get initial pose from Forest environment
+        # init_poses is a tuple (positions, orientations) from get_world_poses()
+        poses_tuple = forest_env.init_poses
+        init_pos = poses_tuple[0][0:1]  # positions tensor, first env
+        init_rot = poses_tuple[1][0:1]  # orientations tensor, first env
+        init_vels = forest_env.init_vels[0:1]
+    else:
+        # Use the translations from basic scene setup
+        translations = torch.zeros(1, 3, device=cfg.sim.device)
+        translations[0, 2] = 1.0  # Start at height 1.0m
+        init_pos = translations.clone()
+        init_rpy = torch.zeros(1, 3, device=cfg.sim.device)
+        init_rot = euler_to_quaternion(init_rpy)
+        init_vels = torch.zeros(1, 6, device=cfg.sim.device)
 
     def reset_drone():
         """Reset drone to initial position."""
@@ -645,16 +714,20 @@ def main(cfg):
             continue
 
         # Integrate yaw rate to get target yaw (similar to PX4 Position Mode)
-        target_yaw_state += target_yaw_rate * cfg.sim.dt
+        # Ensure the increment is a tensor on the correct device
+        yaw_increment = torch.tensor(target_yaw_rate * cfg.sim.dt, device=cfg.sim.device)
+        target_yaw_state = target_yaw_state + yaw_increment
         
-        # Convert to tensors
+        # Convert to tensors and ensure they're on the correct device
         target_vel_tensor = target_vel.unsqueeze(0).to(cfg.sim.device)
-        target_yaw = target_yaw_state.unsqueeze(0)
+        target_yaw = target_yaw_state.unsqueeze(0).to(cfg.sim.device)
 
         # Compute control action using LeePositionController
         # When target_vel is zero, controller will hold current position
+        # Ensure drone_state is on the correct device
+        drone_state_tensor = drone_state.unsqueeze(0).to(cfg.sim.device)
         action = controller.compute(
-            drone_state.unsqueeze(0),
+            drone_state_tensor,
             target_pos=None,  # None means use current position as target (position hold)
             target_vel=target_vel_tensor,  # Velocity command
             target_yaw=target_yaw  # Yaw command
@@ -662,6 +735,11 @@ def main(cfg):
 
         # Apply action
         drone.apply_action(action)
+        
+        # Update lidar if using Forest environment
+        if use_forest:
+            forest_env.lidar.update(sim.get_physics_dt())
+        
         sim.step(render=True)
 
         # Get and display camera images in real-time
@@ -703,6 +781,9 @@ def main(cfg):
     keyboard_ctrl.stop()
     if joystick_ctrl:
         joystick_ctrl.stop()
+    if use_forest:
+        # Forest environment cleanup is handled by simulation_app.close()
+        pass
     simulation_app.close()
 
 
