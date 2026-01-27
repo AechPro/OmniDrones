@@ -24,4 +24,4 @@
 from .ppo import PPOPolicy
 from .ppo_rnn import PPORNNPolicy
 from .ppo_adapt import PPOAdaptivePolicy
-# from .mappo import MAPPOPolicy
+from .mappo import MAPPOPolicy

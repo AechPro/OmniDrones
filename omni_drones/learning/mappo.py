@@ -232,7 +232,7 @@ class MAPPOPolicy(object):
             torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
             * advantages
         )
-        policy_loss = - torch.mean(torch.min(surr1, surr2) * self.act_dim)
+        policy_loss = - torch.mean(torch.min(surr1, surr2))
         entropy_loss = - torch.mean(dist_entropy)
 
         self.actor_opt.zero_grad()
@@ -265,15 +265,15 @@ class MAPPOPolicy(object):
 
         value_loss = torch.max(value_loss_original, value_loss_clipped)
 
-        value_loss.backward()  # do not multiply weights here
+        self.critic_opt.zero_grad()
+        value_loss.backward()
         grad_norm = nn.utils.clip_grad_norm_(
             self.critic.parameters(), self.cfg.max_grad_norm
         )
         self.critic_opt.step()
-        self.critic_opt.zero_grad(set_to_none=True)
         explained_var = 1 - F.mse_loss(values, b_returns) / b_returns.var()
         return {
-            "value_loss": value_loss.mean(),
+            "value_loss": value_loss.item() if value_loss.numel() == 1 else value_loss.mean().item(),
             "critic_grad_norm": grad_norm.item(),
             "explained_var": explained_var.item()
         }

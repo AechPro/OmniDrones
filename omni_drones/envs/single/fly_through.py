@@ -216,17 +216,20 @@ class FlyThrough(IsaacEnv):
 
     def _reset_idx(self, env_ids: torch.Tensor):
         self.drone._reset_idx(env_ids)
-
         drone_pos = self.init_pos_dist.sample((*env_ids.shape, 1))
         drone_rpy = self.init_rpy_dist.sample((*env_ids.shape, 1))
         drone_rot = euler_to_quaternion(drone_rpy)
+        envs_positions_unsq = self.envs_positions[env_ids].unsqueeze(1)
+        drone_world_pos = drone_pos + envs_positions_unsq
         self.drone.set_world_poses(
-            drone_pos + self.envs_positions[env_ids].unsqueeze(1), drone_rot, env_ids
+            drone_world_pos, drone_rot, env_ids
         )
-        self.drone.set_velocities(self.init_vels[env_ids], env_ids)
-        self.drone.set_joint_positions(self.init_joint_pos[env_ids], env_ids)
-        self.drone.set_joint_velocities(self.init_joint_vels[env_ids], env_ids)
-
+        init_vels_selected = self.init_vels[env_ids]
+        self.drone.set_velocities(init_vels_selected, env_ids)
+        init_joint_pos_selected = self.init_joint_pos[env_ids]
+        self.drone.set_joint_positions(init_joint_pos_selected, env_ids)
+        init_joint_vels_selected = self.init_joint_vels[env_ids]
+        self.drone.set_joint_velocities(init_joint_vels_selected, env_ids)
         self.crossed_plane[env_ids] = False
 
         target_pos = self.target_pos_dist.sample((*env_ids.shape, 1))

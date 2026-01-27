@@ -30,7 +30,7 @@ from torchrl.data import Composite, TensorSpec
 from torchrl.modules import ProbabilisticActor
 from torchrl.envs.transforms import CatTensors
 from tensordict import TensorDict
-from tensordict.nn import TensorDictModule, TensorDictSequential
+from tensordict.nn import TensorDictModuleBase, TensorDictModule, TensorDictSequential
 
 from hydra.core.config_store import ConfigStore
 from dataclasses import dataclass
@@ -74,7 +74,7 @@ class Actor(nn.Module):
         return loc, scale
 
 
-class MAPPOPolicy:
+class MAPPOPolicy(TensorDictModuleBase):
 
     def __init__(
         self,
@@ -82,15 +82,15 @@ class MAPPOPolicy:
         observation_spec: Composite,
         action_spec: Composite,
         reward_spec: TensorSpec,
-        device
-    ):
+        device):
+        super().__init__()
         self.cfg = cfg
         self.device = device
 
         self.entropy_coef = 0.001
         self.clip_param = 0.1
         self.critic_loss_fn = nn.HuberLoss(delta=10)
-        self.n_agents, self.action_dim = action_spec.shape[-2:]
+        self.n_agents, self.action_dim = action_spec[("agents", "action")].shape[-2:]
         self.gae = GAE(0.99, 0.95)
 
         fake_input = observation_spec.zero()
@@ -101,22 +101,27 @@ class MAPPOPolicy:
                 [("agents", "observation")], ["loc", "scale"]
             )
         else:
-            ...
+            raise NotImplementedError("Non-shared actor not implemented for MAPPOPolicy")
         self.actor: ProbabilisticActor = ProbabilisticActor(
             module=actor_module,
             in_keys=["loc", "scale"],
             out_keys=[("agents", "action")],
             distribution_class=IndependentNormal,
-            return_log_prob=True
+            return_log_prob=True,
+            log_prob_key="sample_log_prob"
         ).to(self.device)
 
         if ("agents", "observation_central") in observation_spec.keys(True):
             critic_input = [("agents", "observation_central")]
+            # centralized = True
         else:
             logging.warning("No central observation found, using local observation for critic.")
             critic_input = [("agents", "observation")]
+            # centralized = False
+
+        # critic has to output reward for each agent
         self.critic = TensorDictModule(
-            nn.Sequential(make_mlp([256, 256, 256]), nn.LazyLinear(1)),
+            nn.Sequential(make_mlp([256, 256, 256]), nn.LazyLinear(reward_spec['agents']['reward'].shape[-2])),
             critic_input, ["state_value"]
         ).to(self.device)
 
@@ -133,12 +138,15 @@ class MAPPOPolicy:
 
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=5e-4)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=5e-4)
-        self.value_norm = ValueNorm1(reward_spec.shape[-2:]).to(self.device)
+        reward_shape = reward_spec[("agents", "reward")].shape[-2:]
+        # if centralized:
+            # reward_shape = torch.Size([1, reward_spec[("agents", "reward")].shape[-1]])
+        self.value_norm = ValueNorm1(reward_shape).to(self.device)
 
     def __call__(self, tensordict: TensorDict):
-        tensordict = self.actor(tensordict)
-        tensordict = self.critic(tensordict)
-        tensordict = tensordict.exclude("loc", "scale", "feature")
+        self.actor(tensordict)
+        self.critic(tensordict)
+        tensordict.exclude("loc", "scale", "feature", inplace=True)
         return tensordict
 
     def train_op(self, tensordict: TensorDict):
@@ -152,6 +160,15 @@ class MAPPOPolicy:
             .unsqueeze(-1)
         )
         values = tensordict["state_value"]
+        if len(values.shape) == 3:
+            values = values.unsqueeze(-1)
+        if len(next_values.shape) == 3:
+            next_values = next_values.unsqueeze(-1)
+        num_agents = tensordict["agents"]["action"].shape[-2]
+        if values.shape[-2] == 1:
+            values = values.repeat_interleave(num_agents, dim=-2)
+        if next_values.shape[-2] == 1:
+            next_values = next_values.repeat_interleave(num_agents, dim=-2)
         values = self.value_norm.denormalize(values)
         next_values = self.value_norm.denormalize(next_values)
 
@@ -184,7 +201,7 @@ class MAPPOPolicy:
         ratio = torch.exp(log_probs - tensordict["sample_log_prob"]).unsqueeze(-1)
         surr1 = adv * ratio
         surr2 = adv * ratio.clamp(1.-self.clip_param, 1.+self.clip_param)
-        policy_loss = - torch.mean(torch.min(surr1, surr2)) * self.action_dim
+        policy_loss = - torch.mean(torch.min(surr1, surr2))
         entropy_loss = - self.entropy_coef * torch.mean(entropy)
 
         b_values = tensordict["state_value"]
@@ -193,18 +210,27 @@ class MAPPOPolicy:
         values_clipped = b_values + (values - b_values).clamp(
             -self.clip_param, self.clip_param
         )
+        if len(values_clipped.shape) == 2:
+            values_clipped = values_clipped.unsqueeze(-1)
+        if len(values.shape) == 2:
+            values = values.unsqueeze(-1)
         value_loss_clipped = self.critic_loss_fn(b_returns, values_clipped)
         value_loss_original = self.critic_loss_fn(b_returns, values)
         value_loss = torch.max(value_loss_original, value_loss_clipped)
 
-        loss = policy_loss + entropy_loss + value_loss
+        # Update actor
+        actor_loss = policy_loss + entropy_loss
         self.actor_opt.zero_grad()
-        self.critic_opt.zero_grad()
-        loss.backward()
+        actor_loss.backward()
         actor_grad_norm = nn.utils.clip_grad.clip_grad_norm_(self.actor.parameters(), 5)
-        critic_grad_norm = nn.utils.clip_grad.clip_grad_norm_(self.critic.parameters(), 5)
         self.actor_opt.step()
+
+        # Update critic
+        self.critic_opt.zero_grad()
+        value_loss.backward()
+        critic_grad_norm = nn.utils.clip_grad.clip_grad_norm_(self.critic.parameters(), 5)
         self.critic_opt.step()
+
         explained_var = 1 - F.mse_loss(values, b_returns) / b_returns.var()
         return TensorDict({
             "policy_loss": policy_loss,

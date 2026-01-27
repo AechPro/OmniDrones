@@ -1,0 +1,63 @@
+name: DroneRaceEnv
+
+defaults:
+  # see https://hydra.cc/docs/advanced/overriding_packages/
+  - /base/env_base@_here_
+  - /base/sim_base@_here_
+
+env:
+  num_envs: 512
+  max_episode_length: 600
+
+drone_model:
+  name: Hummingbird
+  controller: LeePositionController
+
+# Track configuration: config-based track with custom gate positions and orientations
+# If track_config is provided, it will be used. Otherwise, circular track parameters below will be used.
+track_config:
+  "1":
+    pos: [0.0, 0.0, 1.0]
+    yaw: 0.0
+  "2":
+    pos: [10.0, 5.0, 0.0]
+    yaw: 0.0
+  "3":
+    pos: [10.0, -5.0, 0.0]
+    yaw: 1.25  # (5/4) * pi
+  "4":
+    pos: [-5.0, -5.0, 2.5]
+    yaw: 3.14159  # pi
+  "5":
+    pos: [-5.0, -5.0, 0.0]
+    yaw: 0.0
+  "6":
+    pos: [5.0, 0.0, 0.0]
+    yaw: 1.5708  # pi/2
+  "7":
+    pos: [0.0, 5.0, 0.0]
+    yaw: 3.14159  # pi
+
+# Circular track parameters (only used if track_config is not provided)
+# num_gates: 8
+# track_radius: 5.0
+# gate_spacing: 3.0
+# gate_height: 2.0
+
+# Gate settings
+gate_scale: 1.0
+pass_threshold: 0.8
+
+# Reward settings
+reward_progress_scale: 2.0
+reward_gate_passage: 10.0
+reward_effort_weight: 0.1
+reward_final_position: 10.0
+
+# Observation settings
+time_encoding: true
+
+# Episode settings
+reset_on_collision: false
+
+action_transform: null

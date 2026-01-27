@@ -22,6 +22,10 @@
 
 
 from .single import Hover, Track, FlyThrough
+try:
+    from .drone_race import DroneRaceEnv
+except ImportError:
+    pass
 from .payload import PayloadHover, PayloadTrack, PayloadFlyThrough
 from .inv_pendulum import InvPendulumHover, InvPendulumTrack, InvPendulumFlyThrough
 from .dragon import DragonHover
