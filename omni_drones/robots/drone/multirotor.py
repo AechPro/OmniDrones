@@ -144,6 +144,10 @@ class MultirotorBase(RobotBase):
         self.thrusts = torch.zeros(*self.shape, self.num_rotors, 3, device=self.device)
         self.torques = torch.zeros(*self.shape, 3, device=self.device)
         self.forces = torch.zeros(*self.shape, 3, device=self.device)
+        # A reset writes the root pose and the joint state, but the child-link
+        # transform cache is only propagated by the next physics step. Raised on
+        # reset, cleared by the refresh in apply_action.
+        self._kinematics_dirty = True
 
         self.pos, self.rot = self.get_world_poses(True)
         self.throttle_difference = torch.zeros(self.throttle.shape[:-1], device=self.device)
@@ -244,6 +248,16 @@ class MultirotorBase(RobotBase):
 
         thrusts, moments = self.rotors(rotor_cmds)
 
+        if self._kinematics_dirty:
+            # Recompute every link transform from the root pose and joint state
+            # that the reset just wrote. Without this the read below returns the
+            # previous episode's rotor attitude on the first step of the episode,
+            # corrupting both the reaction-torque axis and the is_global=False
+            # thrust conversion.
+            sim_view = getattr(self._view, "_physics_sim_view", None)
+            if sim_view is not None and hasattr(sim_view, "update_articulations_kinematic"):
+                sim_view.update_articulations_kinematic()
+            self._kinematics_dirty = False
         rotor_pos, rotor_rot = self.rotors_view.get_world_poses()
         torque_axis = quat_axis(rotor_rot.flatten(end_dim=-2), axis=2).unflatten(0, (*self.shape, self.num_rotors))
 
@@ -324,7 +338,18 @@ class MultirotorBase(RobotBase):
 
         init_throttle = self.gravity[env_ids] / self.KF[env_ids].sum(-1, keepdim=True)
         self.throttle.data[env_ids] = self.rotors.f_inv(init_throttle)
-        self.throttle_difference[env_ids].fill_(0.0)
+        # x[idx].fill_(v) fills an advanced-index COPY and is a no-op; assign.
+        self.throttle_difference[env_ids] = 0.0
+        # The rotors are part of the articulation; without this they carry their
+        # angle and spin from the previous episode into the new one. Restricted
+        # to the rotor joints so a payload joint is not disturbed.
+        if self.is_articulation and self.rotor_joint_indices is not None:
+            zeros = torch.zeros(len(env_ids), self.num_rotors, device=self.device)
+            self._view.set_joint_positions(
+                zeros, env_indices=env_ids, joint_indices=self.rotor_joint_indices)
+            self._view.set_joint_velocities(
+                zeros, env_indices=env_ids, joint_indices=self.rotor_joint_indices)
+        self._kinematics_dirty = True
         return env_ids
 
     def _randomize(self, env_ids: torch.Tensor, distributions: Dict[str, D.Distribution]):
